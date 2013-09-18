@@ -29,4 +29,6 @@
 -(NSData *) extractStream:(NSString *)aFile;
 -(BOOL) unrarCloseFile;
 
+-(NSArray *)unrarListFilesNoEncodingWithFileSizeArray:(NSArray**)fileSizeArray;
+-(NSData *) extractStreamWithIndex:(NSInteger)targetIndex;
 @end

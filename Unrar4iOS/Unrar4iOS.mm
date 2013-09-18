@@ -9,6 +9,33 @@
 #import "Unrar4iOS.h"
 #import "RARExtractException.h"
 
+///
+static unsigned char errorShiftJIS[] = {	//ShiftJIS 0x5C probrem (/)
+	0x81,0x83,0x84,0x87,0x89,0x8a,0x8b,0x8c,0x8d,0x8e,
+	0x8f,0x90,0x91,0x92,0x93,0x94,0x95,0x96,0x97,0x98,
+	0x99,0x9a,0x9b,0x9c,0x9d,0x9e,0x9f,0xe0,0xe1,0xe2,
+	0xe3,0xe4,0xe5,0xe6,0xe7,0xe8,0xe9,0xea,0xed,0xee,
+    0xfa,0xfb};
+
+//
+
+//RARで何故か 955C -> 952F などになってしまって困る頻出文字を治す
+void convertShiftJIS_ErrorCharactorsInRar(char* str)
+{
+	int len = strlen(str);
+	for(int i=1;i<len;i++){
+		if((unsigned char)str[i] == 0x2F){
+			for(int j=0;j<42;j++){
+				if((unsigned char)str[i-1] == errorShiftJIS[j]){
+					str[i]= 0x5C;	//		\
+					break;
+				}
+			}
+		}
+	}
+}
+
+
 @interface Unrar4iOS(PrivateMethods)
 -(BOOL)_unrarOpenFile:(NSString*)rarFile inMode:(NSInteger)mode;
 -(BOOL)_unrarOpenFile:(NSString*)rarFile inMode:(NSInteger)mode withPassword:(NSString*)password;
@@ -102,6 +129,37 @@ int CALLBACK CallbackProc(UINT msg, long UserData, long P1, long P2) {
 	return files;
 }
 
+-(NSArray *)unrarListFilesNoEncodingWithFileSizeArray:(NSArray**)fileSizeArray;
+{
+	int RHCode = 0, PFCode = 0;
+    
+	if ([self _unrarOpenFile:filename inMode:RAR_OM_LIST_INCSPLIT withPassword:password] == NO)
+        return nil;
+	
+	NSMutableArray *files = [NSMutableArray array];
+    NSMutableArray *length = [NSMutableArray array];
+	while ((RHCode = RARReadHeaderEx(_rarFile, header)) == 0) {
+		//NSString *_filename = [NSString stringWithCString:header->FileName encoding:NSASCIIStringEncoding];
+        
+        convertShiftJIS_ErrorCharactorsInRar(header->FileName);
+        NSData* data = [NSData dataWithBytes:header->FileName length:strlen(header->FileName)+1];
+		[files addObject:data];
+        [length addObject:[NSNumber numberWithLongLong:header->UnpSize]];
+
+        
+		
+		if ((PFCode = RARProcessFile(_rarFile, RAR_SKIP, NULL, NULL)) != 0) {
+			[self _unrarCloseFile];
+			return nil;
+		}
+	}
+    
+    if(fileSizeArray) *fileSizeArray = length;
+    
+	[self _unrarCloseFile];
+	return files;
+}
+
 -(BOOL) unrarFileTo:(NSString*)path overWrite:(BOOL)overwrite {
     int RHCode = 0, PFCode = 0;
     
@@ -169,6 +227,63 @@ int CALLBACK CallbackProc(UINT msg, long UserData, long P1, long P2) {
     if(PFCode == ERAR_UNKNOWN_FORMAT) {
         RARExtractException *exception = [RARExtractException exceptionWithStatus:RARArchiveBadFormat];
         @throw exception;           
+        return nil;
+    }
+    
+    return [NSData dataWithBytesNoCopy:buffer length:length freeWhenDone:YES];
+}
+
+-(NSData *) extractStreamWithIndex:(NSInteger)targetIndex
+{
+    int RHCode = 0, PFCode = 0;
+	
+	if ([self _unrarOpenFile:filename inMode:RAR_OM_EXTRACT withPassword:password] == NO)
+        return nil;
+	
+	size_t length = 0;
+    int index = 0;
+	while ((RHCode = RARReadHeaderEx(_rarFile, header)) == 0) {
+		//NSString *_filename = [NSString stringWithCString:header->FileName encoding:NSASCIIStringEncoding];
+        
+		if (index == targetIndex) {
+			length = header->UnpSize;
+			break;
+		}
+		else {
+			if ((PFCode = RARProcessFile(_rarFile, RAR_SKIP, NULL, NULL)) != 0) {
+				[self _unrarCloseFile];
+				return nil;
+			}
+		}
+        index++;
+	}
+	
+	if (length == 0) { // archived file not found
+		[self _unrarCloseFile];
+		return nil;
+	}
+	
+	UInt8 *buffer = (UInt8 *)malloc(length * sizeof(UInt8));
+	UInt8 *callBackBuffer = buffer;
+	
+	RARSetCallback(_rarFile, CallbackProc, (long) &callBackBuffer);
+	
+	PFCode = RARProcessFile(_rarFile, RAR_TEST, NULL, NULL);
+    
+    [self _unrarCloseFile];
+    if(PFCode == ERAR_MISSING_PASSWORD) {
+        RARExtractException *exception = [RARExtractException exceptionWithStatus:RARArchiveProtected];
+        @throw exception;
+        return nil;
+    }
+    if(PFCode == ERAR_BAD_ARCHIVE) {
+        RARExtractException *exception = [RARExtractException exceptionWithStatus:RARArchiveInvalid];
+        @throw exception;
+        return nil;
+    }
+    if(PFCode == ERAR_UNKNOWN_FORMAT) {
+        RARExtractException *exception = [RARExtractException exceptionWithStatus:RARArchiveBadFormat];
+        @throw exception;
         return nil;
     }
     
